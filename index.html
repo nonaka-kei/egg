@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Egg - The Battle Game</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;700;900&family=Zen+Maru+Gothic:wght@500;700;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <header>
+            <h1 class="game-title">EGG</h1>
+            <div class="turn-indicator" id="turn-indicator">Ready?</div>
+        </header>
+
+        <main class="game-board">
+            <!-- Opponent Area -->
+            <section class="player-area opponent" id="opponent-area">
+                <div class="character">
+                    <div class="avatar">CPU</div>
+                    <div class="status-effects" id="opponent-status"></div>
+                </div>
+                <div class="health-bar-container">
+                    <div class="health-label">HP</div>
+                    <div class="health-bar">
+                        <div class="health-fill" style="width: 100%;" id="opponent-hp-bar"></div>
+                    </div>
+                    <div class="health-text" id="opponent-hp-text">5/5</div>
+                </div>
+                <!-- Opponent Move Reveal -->
+                <div class="move-reveal" id="opponent-move">?</div>
+            </section>
+
+            <!-- Battle Center / Log -->
+            <section class="battle-center">
+                <div class="log-container" id="game-log">
+                    <div class="log-entry">Game Start!</div>
+                </div>
+            </section>
+
+            <!-- Player Area -->
+            <section class="player-area player" id="player-area">
+                <!-- Player Move Reveal (Hidden until reveal) -->
+                <div class="move-reveal" id="player-move">...</div>
+
+                <div class="health-bar-container">
+                    <div class="health-label">YOU</div>
+                    <div class="health-bar">
+                        <div class="health-fill" style="width: 100%;" id="player-hp-bar"></div>
+                    </div>
+                    <div class="health-text" id="player-hp-text">5/5</div>
+                </div>
+                
+                <div class="character">
+                    <div class="status-effects" id="player-status"></div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="controls-area">
+            <div class="action-buttons">
+                <button class="action-btn attack" data-action="attack">
+                    <span class="btn-icon">⚔️</span>
+                    <span class="btn-label">Attack</span>
+                </button>
+                <button class="action-btn egg" data-action="egg">
+                    <span class="btn-icon">🥚</span>
+                    <span class="btn-label">Egg</span>
+                </button>
+                <button class="action-btn sausage" data-action="sausage">
+                    <span class="btn-icon">🌭</span>
+                    <span class="btn-label">Sausage</span>
+                </button>
+                <button class="action-btn barrier" data-action="barrier">
+                    <span class="btn-icon">🛡️</span>
+                    <span class="btn-label">Barrier</span>
+                </button>
+            </div>
+            <div class="game-state-message" id="state-message">Select your move!</div>
+        </footer>
+    </div>
+    <script src="game.js"></script>
+</body>
+</html>
