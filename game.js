@@ -130,9 +130,17 @@ class GameEngine {
         this.player.history.push(playerMove);
         this.opponent.history.push(opponentMove);
 
-        // Resolve Interactions
-        this.resolveInteraction(this.player, playerMove, this.opponent, opponentMove);
-        this.resolveInteraction(this.opponent, opponentMove, this.player, playerMove);
+        // SNAPSHOT STATE:
+        // Capture "Has Egg" status BEFORE any moves execute.
+        // This ensures that "Curing" an egg doesn't magically enable "Reflect" in the same turn.
+        const p1HasEggSnapshot = this.player.eggs.length > 0;
+        const p2HasEggSnapshot = this.opponent.eggs.length > 0;
+
+        // Resolve Interactions passing Snapshots
+        // P1 Action
+        this.resolveInteraction(this.player, playerMove, this.opponent, opponentMove, p1HasEggSnapshot, p2HasEggSnapshot);
+        // P2 Action (Note: snapshots are symmetrical)
+        this.resolveInteraction(this.opponent, opponentMove, this.player, playerMove, p2HasEggSnapshot, p1HasEggSnapshot);
 
         // Process End of Turn
         this.processEndOfTurn();
@@ -163,14 +171,16 @@ class GameEngine {
         return availableMoves[Math.floor(Math.random() * availableMoves.length)];
     }
 
-    resolveInteraction(p1, m1, p2, m2) {
+    resolveInteraction(p1, m1, p2, m2, p1HasEggSnap, p2HasEggSnap) {
         // -- P1 USES ATTACK --
         if (m1 === MOVES.ATTACK) {
             if (m2 === MOVES.SAUSAGE) {
                 // P2 Reflects Attack?
-                if (p2.eggs.length > 0) {
-                    this.log(`${p2.name} uses Sausage! It cures their Egg, but they take damage!`);
-                    p2.removeEgg();
+                // FIX: Use SNAPSHOT. If P2 started turn with Egg, they CANNOT reflect.
+                // Even if they cure it this turn (handled later/elsewhere), the "Reflect" capability is gone for this instant.
+                if (p2HasEggSnap) {
+                    this.log(`${p2.name} is holding an Egg, so Sausage fails to Reflect! They take damage!`);
+                    // Note: They might ALSO cure the egg in their own action phase.
                     p2.hp -= 1;
                 } else {
                     this.log(`${p2.name} Reflects the Attack with Sausage! ${p1.name} takes damage!`);
