@@ -1,5 +1,6 @@
 /**
  * Egg Game - Core Logic & UI Controller
+ * Updated for Online Multiplayer
  */
 
 /* --- CONSTANTS & CONFIG --- */
@@ -82,12 +83,19 @@ class PlayerState {
 
 class GameEngine {
     constructor() {
+        this.reset();
+        this.onStateChange = null; // Callback for UI
+    }
+
+    reset() {
         this.player = new PlayerState('player', 'You');
         this.opponent = new PlayerState('opponent', 'CPU');
         this.turn = 1;
         this.isGameOver = false;
         this.logs = [];
-        this.onStateChange = null; // Callback for UI
+        this.isOnline = false;
+        this.myMove = null;
+        this.oppMove = null;
     }
 
     log(message) {
@@ -95,37 +103,59 @@ class GameEngine {
         if (this.onStateChange) this.onStateChange('log', message);
     }
 
-    // Main Turn Resolution
-    resolveTurn(playerMove) {
+    // Call this when ANY move is decided (Local or Network)
+    // For Online: 
+    // - P1 selects move -> stored in `myMove`
+    // - P2 sends move -> stored in `oppMove`
+    // - When both exist -> `resolveRound()`
+    registerMove(isPlayer, move) {
+        if (isPlayer) this.myMove = move;
+        else this.oppMove = move;
+
+        if (this.myMove && this.oppMove) {
+            this.resolveRound();
+        }
+    }
+
+    resolveRound() {
         if (this.isGameOver) return;
 
-        // 1. CPU Move
-        const opponentMove = this.decideCpuMove();
+        const playerMove = this.myMove;
+        const opponentMove = this.oppMove;
 
         this.log(`--- Turn ${this.turn} ---`);
-        this.log(`You: [${playerMove.toUpperCase()}] vs CPU: [${opponentMove.toUpperCase()}]`);
+        this.log(`You: [${playerMove.toUpperCase()}] vs ${this.opponent.name}: [${opponentMove.toUpperCase()}]`);
 
         // Record history
         this.player.history.push(playerMove);
         this.opponent.history.push(opponentMove);
 
-        // 2. Resolve Interactions
+        // Resolve Interactions
         this.resolveInteraction(this.player, playerMove, this.opponent, opponentMove);
         this.resolveInteraction(this.opponent, opponentMove, this.player, playerMove);
 
-        // 3. Process End of Turn (Egg Timers & Death Checks)
+        // Process End of Turn
         this.processEndOfTurn();
 
-        // 4. Update UI
-        if (this.onStateChange) this.onStateChange('update');
-
+        // Cleanup
+        this.myMove = null;
+        this.oppMove = null;
         this.turn++;
+
+        // Update UI
+        if (this.onStateChange) this.onStateChange('update');
+        if (this.onStateChange) this.onStateChange('round_end');
     }
 
     decideCpuMove() {
-        // Simple AI for now
+        // AI Logic:
+        // Priority Cure
+        if (this.opponent.eggs.length > 0 && this.opponent.canUseSausage()) {
+            const hasCurable = this.opponent.eggs.some(e => !e.isReflected);
+            if (hasCurable) return MOVES.SAUSAGE;
+        }
+
         const availableMoves = Object.values(MOVES);
-        // Filter sausage if limit reached
         if (!this.opponent.canUseSausage()) {
             const idx = availableMoves.indexOf(MOVES.SAUSAGE);
             if (idx > -1) availableMoves.splice(idx, 1);
@@ -133,24 +163,11 @@ class GameEngine {
         return availableMoves[Math.floor(Math.random() * availableMoves.length)];
     }
 
-    /*
-     * Resolves action of Attacker vs Defender
-     * Note: Since moves are simultaneous, we call this twice:
-     * once for P1 acting on P2, and once for P2 acting on P1.
-     * BUT we need to be careful with "Reflect" logic.
-     * 
-     * Better approach: Handle pairs strictly.
-     */
     resolveInteraction(p1, m1, p2, m2) {
-        // We only care about P1's offensive actions impacting P2 here.
-        // Or specific self-actions like curing.
-
         // -- P1 USES ATTACK --
         if (m1 === MOVES.ATTACK) {
             if (m2 === MOVES.SAUSAGE) {
                 // P2 Reflects Attack?
-                // Rule: "Sausage reflects attack"
-                // EXCEPTION: If P2 has Egg, Sausage cures Egg but CANNOT reflect attack.
                 if (p2.eggs.length > 0) {
                     this.log(`${p2.name} uses Sausage! It cures their Egg, but they take damage!`);
                     p2.removeEgg();
@@ -160,11 +177,9 @@ class GameEngine {
                     p1.hp -= 1;
                 }
             } else if (m2 === MOVES.BARRIER) {
-                // Barrier fails vs Attack
                 this.log(`${p2.name}'s Barrier failed! Hit by Attack.`);
                 p2.hp -= 1;
             } else {
-                // Direct Hit (vs Attack or Egg)
                 this.log(`${p1.name} Attacks! ${p2.name} takes damage.`);
                 p2.hp -= 1;
             }
@@ -173,15 +188,12 @@ class GameEngine {
         // -- P1 USES EGG --
         else if (m1 === MOVES.EGG) {
             if (m2 === MOVES.BARRIER) {
-                // Barrier Reflects Egg
                 this.log(`${p2.name}'s Barrier reflects the Egg! ${p1.name} receives an Uncurable Egg!`);
-                const instantDeath = p1.addEgg(true); // Reflected egg is uncurable
+                const instantDeath = p1.addEgg(true);
                 if (instantDeath) this.log(`${p1.name} already had an Egg! DOUBLE EGG!`);
             } else if (m2 === MOVES.SAUSAGE) {
                 // Sausage vs New Egg
-                // Rule: Sausage DOES NOT stop new egg.
-                // FIX: It MIGHT cure an OLD egg first. 
-                // We must check and cure OLD egg before adding NEW egg to prevent Death.
+                // FIX: Check cure OLD egg first.
                 const cured = p2.removeEgg(true);
                 if (cured) this.log(`${p2.name} ate a Sausage and cured their Old Egg!`);
 
@@ -189,7 +201,6 @@ class GameEngine {
                 const instant = p2.addEgg();
                 if (instant) this.log(`${p2.name} already had an Egg! DOUBLE EGG!`);
             } else {
-                // Vs Attack or Egg
                 this.log(`${p1.name} plants an Egg on ${p2.name}!`);
                 const instant = p2.addEgg();
                 if (instant) this.log(`${p2.name} already had an Egg! DOUBLE EGG!`);
@@ -197,56 +208,62 @@ class GameEngine {
         }
 
         // -- P1 USES SAUSAGE (Self-Cure part) --
-        /* 
-           We need to be careful not to double-count.
-           Sausage Reflect logic is handled in "P2 Attacks" block.
-           Here we handle the "Cure" aspect.
-        */
         if (m1 === MOVES.SAUSAGE) {
-            // Try to cure self
-            // Note: If we were attacked, we might have reflected it (handled above).
-            // If we had an egg, we cure it.
-            // Special case: If we are HOLDING an egg, Sausage ALWAYS cures it.
-            // Even if we fail to reflect an attack (handled above), the CURE still happens?
-            // Rule: "Sausage... Cures Egg (at this time attack is not returned)".
-            // This implies Cure happens.
-
-            // So, unconditionally try to cure if we used Sausage.
-            // Wait, if it was a Barrier Reflected egg, we can't cure it.
+            // FIX: If cured, no reflect (handled implicitly by order/logic above).
             const cured = p1.removeEgg(true);
-            if (cured) this.log(`${p1.name} ate a Sausage and cured their Egg!`);
+            if (cured) {
+                this.log(`${p1.name} ate a Sausage and cured their Egg!`);
+            }
         }
     }
 
     processEndOfTurn() {
-        // Update Eggs (Timer tick)
-        if (this.player.updateEggs()) this.log(`${this.player.name}'s Egg EXPLODED!`);
-        if (this.opponent.updateEggs()) this.log(`${this.opponent.name}'s Egg EXPLODED!`);
-
-        // Check HP
+        // Phase 1: Action Resolution Death (Instant)
+        let instantWin = false;
         if (this.player.hp <= 0 && this.opponent.hp <= 0) {
-            // Sudden Death
-            this.log("DOUBLE KO! Sudden Death triggered! Setting HP to 1.");
-            this.player.hp = 1;
-            this.opponent.hp = 1;
-            this.player.eggs = [];
-            this.opponent.eggs = [];
-            this.player.isDead = false;
-            this.opponent.isDead = false;
+            this.log("DOUBLE KO (Instant)! Sudden Death! HP -> 1.");
+            this.player.hp = 1; this.opponent.hp = 1;
+            this.player.eggs = []; this.opponent.eggs = [];
         } else if (this.player.hp <= 0) {
             this.isGameOver = true;
-            this.log("You Lost! Game Over.");
+            this.log("You Lost (Instant)!");
+            if (this.onStateChange) this.onStateChange('gameover', 'lose');
+            instantWin = true;
+        } else if (this.opponent.hp <= 0) {
+            this.isGameOver = true;
+            this.log("You Won (Instant)!");
+            if (this.onStateChange) this.onStateChange('gameover', 'win');
+            instantWin = true;
+        }
+
+        if (instantWin) return;
+
+        // Phase 2: Timer Death
+        const p1Exploded = this.player.updateEggs();
+        const p2Exploded = this.opponent.updateEggs();
+
+        if (p1Exploded) this.log(`${this.player.name}'s Egg EXPLODED!`);
+        if (p2Exploded) this.log(`${this.opponent.name}'s Egg EXPLODED!`);
+
+        if (this.player.hp <= 0 && this.opponent.hp <= 0) {
+            this.log("DOUBLE KO (Timer)! Sudden Death! HP -> 1.");
+            this.player.hp = 1; this.opponent.hp = 1;
+            this.player.eggs = []; this.opponent.eggs = [];
+        } else if (this.player.hp <= 0) {
+            this.isGameOver = true;
+            this.log("You Lost (Time limit)!");
             if (this.onStateChange) this.onStateChange('gameover', 'lose');
         } else if (this.opponent.hp <= 0) {
             this.isGameOver = true;
-            this.log("You Won! Game Over.");
+            this.log("You Won (Time limit)!");
             if (this.onStateChange) this.onStateChange('gameover', 'win');
         }
     }
 }
 
-/* --- UI CONTROLLER --- */
+/* --- UI CONTROLLER & NETWORK --- */
 const engine = new GameEngine();
+const net = new NetworkManager();
 
 const UI = {
     els: {
@@ -261,58 +278,132 @@ const UI = {
         turnIndicator: document.getElementById('turn-indicator'),
         playerMove: document.getElementById('player-move'),
         opponentMove: document.getElementById('opponent-move'),
-        stateMessage: document.getElementById('state-message')
+        stateMessage: document.getElementById('state-message'),
+        // Lobby
+        lobbyScreen: document.getElementById('lobby-screen'),
+        gameBoardMain: document.getElementById('game-board-main'),
+        btnVsCpu: document.getElementById('btn-vs-cpu'),
+        btnJoinRoom: document.getElementById('btn-join-room'),
+        roomCodeInput: document.getElementById('room-code-input'),
+        lobbyStatus: document.getElementById('lobby-status')
     },
 
     init() {
-        // Bind Buttons
+        // Game Buttons
         UI.els.buttons.forEach(btn => {
             btn.addEventListener('click', () => {
                 if (engine.isGameOver) {
-                    location.reload(); // Quick restart
+                    location.reload();
                     return;
                 }
                 const action = btn.dataset.action;
-
-                // Validate Sausage limit
                 if (action === MOVES.SAUSAGE && !engine.player.canUseSausage()) {
                     UI.logSystem("Overate sausages! Cannot use more than 2 in a row.");
                     return;
                 }
 
-                UI.els.buttons.forEach(b => b.disabled = true);
-
-                // Reveal Animation Flow
-                UI.playRound(action);
+                UI.handlePlayerInput(action);
             });
         });
 
-        // Link Engine
+        // Lobby Buttons
+        UI.els.btnVsCpu.onclick = () => UI.startGame(false);
+        UI.els.btnJoinRoom.onclick = () => {
+            const code = UI.els.roomCodeInput.value.trim();
+            if (!code) {
+                UI.updateLobbyStatus("Please enter a Secret Word.", true);
+                return;
+            }
+            UI.startOnline(code);
+        };
+
+        // Engine Hooks
         engine.onStateChange = (type, data) => {
             if (type === 'log') UI.logSystem(data);
             if (type === 'update') UI.render();
             if (type === 'gameover') UI.handleGameOver(data);
+            if (type === 'round_end') UI.showMoveReveal();
         };
 
         UI.render();
     },
 
-    async playRound(playerAction) {
-        // 1. Show Player Move Placeholder
+    updateLobbyStatus(msg, isError = false) {
+        UI.els.lobbyStatus.textContent = msg;
+        UI.els.lobbyStatus.style.color = isError ? '#ff7b72' : 'var(--accent-secondary)';
+    },
+
+    startGame(isOnline) {
+        engine.reset();
+        engine.isOnline = isOnline;
+        if (isOnline) {
+            engine.opponent.name = "Opponent";
+            UI.updateLobbyStatus("Connected! Starting game...");
+        }
+
+        setTimeout(() => {
+            UI.els.lobbyScreen.style.display = 'none';
+            UI.els.gameBoardMain.style.display = 'flex';
+            UI.render();
+        }, 500);
+    },
+
+    async startOnline(secretWord) {
+        UI.updateLobbyStatus("Connecting to Neural Network...", false);
+        UI.els.lobbyScreen.classList.add('connecting');
+
+        net.onConnected = (isHost) => {
+            UI.updateLobbyStatus(isHost ? "Waiting for Opponent..." : "Found Room! Joining...");
+            // If guest, we just wait. If Host, we wait for connection.
+            // Actually onConnected fires when Peer connection is fully established (P2P).
+            // So if this fires, we are ready.
+            UI.startGame(true);
+        };
+
+        net.onData = (data) => {
+            if (data.type === 'move') {
+                engine.registerMove(false, data.move);
+                UI.logSystem("Opponent selected a move!");
+                // If we also moved, engine resolves round automatically.
+            }
+        };
+
+        net.onError = (type) => {
+            UI.els.lobbyScreen.classList.remove('connecting');
+            UI.updateLobbyStatus(`Connection Failed: ${type}`, true);
+        };
+
+        await net.connect(secretWord);
+    },
+
+    handlePlayerInput(action) {
+        // Disable buttons
+        UI.els.buttons.forEach(b => b.disabled = true);
+
+        // Visual feedback
         UI.els.playerMove.textContent = "?";
         UI.els.playerMove.classList.add('anim-pop');
+        UI.els.turnIndicator.textContent = "Waiting...";
 
-        // Short delay for tension
-        await new Promise(r => setTimeout(r, 500));
+        if (engine.isOnline) {
+            net.send({ type: 'move', move: action });
+            engine.registerMove(true, action);
+        } else {
+            // CPU Mode
+            // Fake delay for tension
+            setTimeout(() => {
+                const cpuMove = engine.decideCpuMove();
+                engine.registerMove(false, cpuMove); // Opponent Register
+                engine.registerMove(true, action);   // Player Register -> Triggers Resolve
+            }, 500);
+        }
+    },
 
-        // 2. Resolve Logic
-        engine.resolveTurn(playerAction);
-
-        // 3. Reveal Moves (Visuals)
+    showMoveReveal() {
         const lastP = engine.player.history[engine.player.history.length - 1];
         const lastO = engine.opponent.history[engine.opponent.history.length - 1];
 
-        UI.els.playerMove.innerHTML = UI.getIcon(lastP); // textContent vs innerHTML for emoji
+        UI.els.playerMove.innerHTML = UI.getIcon(lastP);
         UI.els.opponentMove.innerHTML = UI.getIcon(lastO);
 
         // Re-enable buttons if game not over
@@ -339,26 +430,20 @@ const UI = {
     },
 
     render() {
-        // HP
         UI.updateHp(UI.els.playerHpBar, UI.els.playerHpText, engine.player.hp);
         UI.updateHp(UI.els.opponentHpBar, UI.els.opponentHpText, engine.opponent.hp);
-
-        // Status
         UI.renderStatus(UI.els.playerStatus, engine.player);
         UI.renderStatus(UI.els.opponentStatus, engine.opponent);
-
-        // Turn
-        UI.els.turnIndicator.textContent = `Turn ${engine.turn}`;
+        UI.els.turnIndicator.textContent = engine.isGameOver ? "Game Over" :
+            (engine.myMove ? "Waiting for Opponent..." : `Turn ${engine.turn}`);
     },
 
     updateHp(bar, text, hp) {
         const pct = (hp / CONFIG.MAX_HP) * 100;
         bar.style.width = `${pct}%`;
         text.textContent = `${hp}/${CONFIG.MAX_HP}`;
-
-        // Reset classes to ensure animation triggers if needed (simplified)
         bar.className = 'health-fill';
-        void bar.offsetWidth; // Trigger reflow
+        void bar.offsetWidth; // Reflow
         if (hp <= 2) bar.classList.add('low');
         if (hp <= 1) bar.classList.add('critical');
     },
@@ -372,7 +457,7 @@ const UI = {
 
             const badge = document.createElement('div');
             badge.className = 'status-badge';
-            badge.textContent = egg.turnsRemaining + 1; // +1 because it explodes at END of 0
+            badge.textContent = egg.turnsRemaining + 1;
 
             div.appendChild(badge);
             container.appendChild(div);
@@ -392,7 +477,7 @@ const UI = {
         UI.els.stateMessage.textContent = result === 'win' ? "VICTORY!" : "DEFEAT";
         const restartBtn = document.createElement('button');
         restartBtn.className = 'action-btn';
-        restartBtn.textContent = "Play Again";
+        restartBtn.textContent = "Back to Lobby";
         restartBtn.style.gridColumn = "span 2";
         restartBtn.onclick = () => location.reload();
 
@@ -402,5 +487,4 @@ const UI = {
     }
 };
 
-// Start
 document.addEventListener('DOMContentLoaded', UI.init);

@@ -1,14 +1,19 @@
 <!DOCTYPE html>
 <html lang="ja">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Egg - The Battle Game</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;700;900&family=Zen+Maru+Gothic:wght@500;700;900&display=swap" rel="stylesheet">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;700;900&family=Zen+Maru+Gothic:wght@500;700;900&display=swap"
+        rel="stylesheet">
     <link rel="stylesheet" href="style.css">
+    <script src="https://unpkg.com/peerjs@1.5.0/dist/peerjs.min.js"></script>
 </head>
+
 <body>
     <div id="app">
         <header>
@@ -16,7 +21,23 @@
             <div class="turn-indicator" id="turn-indicator">Ready?</div>
         </header>
 
-        <main class="game-board">
+        <!-- LOBBY / TITLE SCREEN -->
+        <div id="lobby-screen" class="fs-overlay">
+            <h1 class="logo-large">EGG</h1>
+            <div class="menu-buttons">
+                <button class="menu-btn primary" id="btn-vs-cpu">VS CPU</button>
+                <div class="divider">OR</div>
+                <div class="online-control">
+                    <input type="text" id="room-code-input" placeholder="Enter Secret Word..." maxlength="12">
+                    <button class="menu-btn secondary" id="btn-join-room">Join / Create Room</button>
+                </div>
+                <p class="status-text" id="lobby-status">Enter a word to play online.</p>
+            </div>
+            <div class="rules-link"><a href="https://github.com/nonaka-kei/egg/blob/main/README.md"
+                    target="_blank">Rules & Info</a></div>
+        </div>
+
+        <main class="game-board" id="game-board-main" style="display: none;">
             <!-- Opponent Area -->
             <section class="player-area opponent" id="opponent-area">
                 <div class="character">
@@ -53,7 +74,7 @@
                     </div>
                     <div class="health-text" id="player-hp-text">5/5</div>
                 </div>
-                
+
                 <div class="character">
                     <div class="status-effects" id="player-status"></div>
                 </div>
@@ -82,6 +103,8 @@
             <div class="game-state-message" id="state-message">Select your move!</div>
         </footer>
     </div>
+    <script src="network.js"></script>
     <script src="game.js"></script>
 </body>
+
 </html>
