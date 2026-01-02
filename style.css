@@ -76,6 +76,55 @@ header {
     justify-content: space-between;
     position: relative;
     padding: 1rem 0;
+    gap: 1rem;
+}
+
+.opponents-grid {
+    display: flex;
+    justify-content: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+    min-height: 150px;
+}
+
+.opponent-card {
+    background: rgba(22, 27, 34, 0.6);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 0.8rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    width: 140px;
+    position: relative;
+    backdrop-filter: blur(5px);
+    transition: all 0.3s ease;
+}
+
+/* Targeting Mode */
+body.targeting-mode .opponent-card {
+    cursor: crosshair;
+    filter: grayscale(1);
+    opacity: 0.6;
+}
+
+body.targeting-mode .opponent-card:hover {
+    filter: none;
+    opacity: 1;
+    border-color: var(--accent-secondary);
+    box-shadow: 0 0 15px rgba(255, 123, 114, 0.4);
+    transform: scale(1.05);
+}
+
+body.targeting-mode .player-area.player {
+    opacity: 0.3;
+    /* Dim self */
+}
+
+/* Dead State */
+.opponent-card.dead {
+    opacity: 0.4;
+    filter: grayscale(1);
 }
 
 .player-area {
@@ -474,7 +523,8 @@ header {
     gap: 0.5rem;
 }
 
-#room-code-input {
+#room-code-input,
+#player-name-input {
     background: var(--surface-color);
     border: 1px solid var(--border-color);
     padding: 1rem;
@@ -485,9 +535,64 @@ header {
     font-family: monospace;
 }
 
-#room-code-input:focus {
+#room-code-input:focus,
+#player-name-input:focus {
     outline: none;
     border-color: var(--accent-primary);
+}
+
+.opponents-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 1rem;
+    width: 100%;
+    max-width: 600px;
+    margin-top: 1rem;
+}
+
+.opponent-card {
+    background: var(--surface-color);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+    text-align: center;
+    transition: all 0.2s ease;
+}
+
+.opponent-card.targeting-mode {
+    cursor: pointer;
+}
+
+.opponent-card.targeting-mode:hover {
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 15px rgba(88, 166, 255, 0.4);
+    transform: translateY(-2px);
+}
+
+.opponent-card.targeting-mode.selected {
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 15px rgba(88, 166, 255, 0.6);
+    background: rgba(88, 166, 255, 0.1);
+}
+
+.opponent-card.targeting-mode.disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.opponent-card .player-name {
+    font-weight: bold;
+    font-size: 1.1rem;
+    color: var(--text-color);
+}
+
+.opponent-card .player-hp {
+    font-size: 0.9rem;
+    color: var(--text-color-light);
 }
 
 .status-text {

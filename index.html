@@ -25,7 +25,8 @@
         <div id="lobby-screen" class="fs-overlay">
             <h1 class="logo-large">EGG</h1>
             <div class="menu-buttons">
-                <button class="menu-btn primary" id="btn-vs-cpu">VS CPU</button>
+                <input type="text" id="player-name-input" placeholder="Your Name" maxlength="8">
+                <button class="menu-btn primary" id="btn-vs-cpu">VS CPU (Battle Royale)</button>
                 <div class="divider">OR</div>
                 <div class="online-control">
                     <input type="text" id="room-code-input" placeholder="Enter Secret Word..." maxlength="12">
@@ -38,22 +39,10 @@
         </div>
 
         <main class="game-board" id="game-board-main" style="display: none;">
-            <!-- Opponent Area -->
-            <section class="player-area opponent" id="opponent-area">
-                <div class="character">
-                    <div class="avatar">CPU</div>
-                    <div class="status-effects" id="opponent-status"></div>
-                </div>
-                <div class="health-bar-container">
-                    <div class="health-label">HP</div>
-                    <div class="health-bar">
-                        <div class="health-fill" style="width: 100%;" id="opponent-hp-bar"></div>
-                    </div>
-                    <div class="health-text" id="opponent-hp-text">5/5</div>
-                </div>
-                <!-- Opponent Move Reveal -->
-                <div class="move-reveal" id="opponent-move">?</div>
-            </section>
+            <!-- Opponents Grid -->
+            <div class="opponents-grid" id="opponents-grid">
+                <!-- Dynamic Player Cards will be inserted here -->
+            </div>
 
             <!-- Battle Center / Log -->
             <section class="battle-center">

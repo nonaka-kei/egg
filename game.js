@@ -1,12 +1,12 @@
 /**
  * Egg Game - Core Logic & UI Controller
- * Updated for Online Multiplayer
+ * Updated for N-Player Battle Royale
  */
 
 /* --- CONSTANTS & CONFIG --- */
 const CONFIG = {
     MAX_HP: 5,
-    EGG_TIMER: 2, // Explodes after 2 turns (end of N+2)
+    EGG_TIMER: 2,
     SAUSAGE_LIMIT: 2
 };
 
@@ -19,52 +19,41 @@ const MOVES = {
 
 /* --- STATE MANAGEMENT --- */
 class PlayerState {
-    constructor(id, name) {
+    constructor(id, name, isCpu = false) {
         this.id = id;
         this.name = name;
+        this.isCpu = isCpu;
         this.hp = CONFIG.MAX_HP;
         this.eggs = []; // Array of { turnsRemaining: number, isReflected: boolean }
-        this.history = []; // History of moves
+        this.history = [];
         this.isDead = false;
+        // Turn-specific flags
+        this.currentMove = null;
+        this.targetId = null;
+        this.hasEggSnapshot = false;
     }
 
     addEgg(isReflected = false) {
-        // Rule: If already has egg, instant death
-        if (this.eggs.length > 0) {
-            this.hp = 0;
-            this.isDead = true;
-            return true; // Exploded
-        }
         this.eggs.push({ turnsRemaining: CONFIG.EGG_TIMER, isReflected });
-        return false;
     }
 
     removeEgg(onlyCurable = true) {
         if (this.eggs.length === 0) return false;
-
-        // Filter out uncurable eggs if specified
-        // FIX: Also filter out "New" eggs (those just applied this turn, i.e., turnsRemaining == CONFIG.EGG_TIMER)
-        // Sausage only cures "Existing" status.
         const curableEggs = this.eggs.filter(e => {
             if (onlyCurable && e.isReflected) return false;
-            // Note: In resolveTurn, we decrement turns AFTER interaction. 
-            // So a new egg has turnsRemaining == 2. Old eggs have < 2.
-            if (e.turnsRemaining === CONFIG.EGG_TIMER) return false;
+            // Only 'existing' eggs (not new ones added this turn cycle, if any exposed)
             return true;
         });
 
         if (curableEggs.length === 0) return false;
-
-        // Remove ALL curable old eggs (usually just 1)
+        // Remove ALL curable (usually just 1 old one, logic might need distinct handling if multiple)
+        // Rule say "Cures Egg". If multiple? Assume all curable ones.
         this.eggs = this.eggs.filter(e => !curableEggs.includes(e));
         return true;
     }
 
     updateEggs() {
-        // Decrease timer
         this.eggs.forEach(egg => egg.turnsRemaining--);
-
-        // Check explosion
         const exploded = this.eggs.some(egg => egg.turnsRemaining < 0);
         if (exploded) {
             this.hp = 0;
@@ -75,7 +64,6 @@ class PlayerState {
 
     canUseSausage() {
         if (this.history.length < CONFIG.SAUSAGE_LIMIT) return true;
-        // Check last N moves
         const lastMoves = this.history.slice(-CONFIG.SAUSAGE_LIMIT);
         return !lastMoves.every(m => m === MOVES.SAUSAGE);
     }
@@ -83,19 +71,33 @@ class PlayerState {
 
 class GameEngine {
     constructor() {
-        this.reset();
-        this.onStateChange = null; // Callback for UI
-    }
-
-    reset() {
-        this.player = new PlayerState('player', 'You');
-        this.opponent = new PlayerState('opponent', 'CPU');
+        this.players = new Map(); // id -> PlayerState
+        this.myId = null;
         this.turn = 1;
         this.isGameOver = false;
         this.logs = [];
-        this.isOnline = false;
-        this.myMove = null;
-        this.oppMove = null;
+        this.onStateChange = null;
+
+        // For Offline CPU Mode
+        this.cpuInterval = null;
+    }
+
+    initGame(myId, myName, others = []) {
+        this.players.clear();
+        this.myId = myId;
+
+        // Add Self
+        this.players.set(myId, new PlayerState(myId, myName));
+
+        // Add Others
+        others.forEach(p => {
+            this.players.set(p.id, new PlayerState(p.id, p.name, p.isCpu));
+        });
+
+        this.turn = 1;
+        this.isGameOver = false;
+        this.logs = [];
+        this.log("Game Start! Battle Royale Mode.");
     }
 
     log(message) {
@@ -103,323 +105,375 @@ class GameEngine {
         if (this.onStateChange) this.onStateChange('log', message);
     }
 
-    // Call this when ANY move is decided (Local or Network)
-    // For Online: 
-    // - P1 selects move -> stored in `myMove`
-    // - P2 sends move -> stored in `oppMove`
-    // - When both exist -> `resolveRound()`
-    registerMove(isPlayer, move) {
-        if (isPlayer) this.myMove = move;
-        else this.oppMove = move;
+    // Call for both Player (via UI) and Network (on receive)
+    registerMove(playerId, action, targetId) {
+        const p = this.players.get(playerId);
+        if (!p || p.isDead) return;
 
-        if (this.myMove && this.oppMove) {
-            this.resolveRound();
+        p.currentMove = action;
+        p.targetId = targetId;
+
+        // Check readiness
+        const livingPlayers = Array.from(this.players.values()).filter(p => !p.isDead);
+        const allReady = livingPlayers.every(p => p.currentMove !== null);
+
+        if (allReady) {
+            this.resolveTurn();
         }
     }
 
-    resolveRound() {
-        if (this.isGameOver) return;
+    // CPU Logic (Host/Local only)
+    queueCpuMoves() {
+        const cpus = Array.from(this.players.values()).filter(p => p.isCpu && !p.isDead);
+        if (cpus.length === 0) return;
 
-        const playerMove = this.myMove;
-        const opponentMove = this.oppMove;
+        // Simple delay
+        setTimeout(() => {
+            cpus.forEach(cpu => {
+                const move = this.decideCpuMove(cpu);
+                // Target random living opponent
+                const potentialTargets = Array.from(this.players.values())
+                    .filter(p => !p.isDead && p.id !== cpu.id);
 
+                let targetId = null;
+                if (potentialTargets.length > 0) {
+                    targetId = potentialTargets[Math.floor(Math.random() * potentialTargets.length)].id;
+                }
+
+                this.registerMove(cpu.id, move, targetId);
+            });
+        }, 500);
+    }
+
+    decideCpuMove(cpuState) {
+        // AI Logic
+        if (cpuState.eggs.some(e => !e.isReflected) && cpuState.canUseSausage()) {
+            return MOVES.SAUSAGE;
+        }
+        const moves = Object.values(MOVES);
+        if (!cpuState.canUseSausage()) {
+            const idx = moves.indexOf(MOVES.SAUSAGE);
+            if (idx > -1) moves.splice(idx, 1);
+        }
+        return moves[Math.floor(Math.random() * moves.length)];
+    }
+
+    resolveTurn() {
         this.log(`--- Turn ${this.turn} ---`);
-        this.log(`You: [${playerMove.toUpperCase()}] vs ${this.opponent.name}: [${opponentMove.toUpperCase()}]`);
+        const livingPlayers = Array.from(this.players.values()).filter(p => !p.isDead);
 
-        // Record history
-        this.player.history.push(playerMove);
-        this.opponent.history.push(opponentMove);
+        // 1. SNAPSHOT
+        livingPlayers.forEach(p => {
+            p.hasEggSnapshot = p.eggs.length > 0;
+            p.history.push(p.currentMove);
 
-        // SNAPSHOT STATE:
-        // Capture "Has Egg" status BEFORE any moves execute.
-        // This ensures that "Curing" an egg doesn't magically enable "Reflect" in the same turn.
-        const p1HasEggSnapshot = this.player.eggs.length > 0;
-        const p2HasEggSnapshot = this.opponent.eggs.length > 0;
+            let targetName = "";
+            if (p.targetId) {
+                const t = this.players.get(p.targetId);
+                targetName = t ? ` -> ${t.name}` : "";
+            }
+            this.log(`${p.name}: [${p.currentMove.toUpperCase()}]${targetName}`);
+        });
 
-        // Resolve Interactions passing Snapshots
-        // P1 Action
-        this.resolveInteraction(this.player, playerMove, this.opponent, opponentMove, p1HasEggSnapshot, p2HasEggSnapshot);
-        // P2 Action (Note: snapshots are symmetrical)
-        this.resolveInteraction(this.opponent, opponentMove, this.player, playerMove, p2HasEggSnapshot, p1HasEggSnapshot);
+        // 2. INTERACTION
+        const damageMap = new Map();
+        const eggMap = new Map();
+        const refEggMap = new Map();
+        livingPlayers.forEach(p => { damageMap.set(p.id, 0); eggMap.set(p.id, 0); refEggMap.set(p.id, 0); });
 
-        // Process End of Turn
-        this.processEndOfTurn();
+        // Loop Defenders
+        livingPlayers.forEach(defender => {
+            const defAction = defender.currentMove;
+            const defHasEgg = defender.hasEggSnapshot; // Snapshot!
+
+            // Self Cure
+            if (defAction === MOVES.SAUSAGE && defHasEgg) {
+                if (defender.removeEgg(true)) this.log(`${defender.name} cured their Egg!`);
+            }
+
+            // Incoming
+            const attackers = livingPlayers.filter(p => p.targetId === defender.id && p.id !== defender.id);
+            attackers.forEach(attacker => {
+                const atkAction = attacker.currentMove;
+
+                // Attack
+                if (atkAction === MOVES.ATTACK) {
+                    if (defAction === MOVES.SAUSAGE && !defHasEgg) {
+                        // Reflect
+                        this.log(`${defender.name} Reflects ${attacker.name}'s Attack!`);
+                        damageMap.set(attacker.id, (damageMap.get(attacker.id) || 0) + 1);
+                    } else if (defAction === MOVES.BARRIER) {
+                        // Fail
+                        this.log(`${defender.name}'s Barrier fails vs Attack!`);
+                        damageMap.set(defender.id, (damageMap.get(defender.id) || 0) + 1);
+                    } else {
+                        // Hit
+                        this.log(`${attacker.name} Attacks ${defender.name}!`);
+                        damageMap.set(defender.id, (damageMap.get(defender.id) || 0) + 1);
+                    }
+                }
+                // Egg
+                else if (atkAction === MOVES.EGG) {
+                    if (defAction === MOVES.BARRIER) {
+                        // Reflect
+                        this.log(`${defender.name} Reflects ${attacker.name}'s Egg! (Uncurable)`);
+                        refEggMap.set(attacker.id, (refEggMap.get(attacker.id) || 0) + 1);
+                    } else if (defAction === MOVES.SAUSAGE && !defHasEgg) {
+                        // Sausage Reflects New Egg? NO. 
+                        // "Sausage... Reflects 'Attack'". Only Attack.
+                        // So Egg lands.
+                        this.log(`${attacker.name} plants Egg on ${defender.name}!`);
+                        eggMap.set(defender.id, (eggMap.get(defender.id) || 0) + 1);
+                    } else {
+                        this.log(`${attacker.name} plants Egg on ${defender.name}!`);
+                        eggMap.set(defender.id, (eggMap.get(defender.id) || 0) + 1);
+                    }
+                }
+            });
+        });
+
+        // 3. APPLY
+        livingPlayers.forEach(p => {
+            p.hp -= (damageMap.get(p.id) || 0);
+
+            const newEggs = (eggMap.get(p.id) || 0);
+            const refEggs = (refEggMap.get(p.id) || 0);
+            const totalIncoming = newEggs + refEggs;
+
+            // Rules: "Egg from 2+ people simultaneously -> Instant Death"
+            // Rules: "Already has egg + New Egg -> Instant Death"
+            if (totalIncoming >= 2) {
+                this.log(`${p.name} HIT BY MULTIPLE EGGS! INSTANT DEATH!`);
+                p.hp = 0;
+            } else if (totalIncoming > 0 && p.hasEggSnapshot && p.eggs.length > 0) {
+                this.log(`${p.name} DOUBLE EGG! INSTANT DEATH!`);
+                p.hp = 0;
+            } else {
+                for (let i = 0; i < newEggs; i++) p.addEgg(false);
+                for (let i = 0; i < refEggs; i++) p.addEgg(true);
+            }
+        });
+
+        // 4. DEATHS
+        this.checkDeaths("Instant");
+
+        // 5. TIMERS
+        Array.from(this.players.values()).filter(p => !p.isDead).forEach(p => {
+            if (p.updateEggs()) this.log(`${p.name}'s Egg EXPLODED!`);
+        });
+
+        this.checkDeaths("Timer");
 
         // Cleanup
-        this.myMove = null;
-        this.oppMove = null;
+        livingPlayers.forEach(p => { p.currentMove = null; p.targetId = null; });
         this.turn++;
-
-        // Update UI
         if (this.onStateChange) this.onStateChange('update');
-        if (this.onStateChange) this.onStateChange('round_end');
+
+        // Trigger CPU if needed
+        this.queueCpuMoves();
     }
 
-    decideCpuMove() {
-        // AI Logic:
-        // Priority Cure
-        if (this.opponent.eggs.length > 0 && this.opponent.canUseSausage()) {
-            const hasCurable = this.opponent.eggs.some(e => !e.isReflected);
-            if (hasCurable) return MOVES.SAUSAGE;
-        }
-
-        const availableMoves = Object.values(MOVES);
-        if (!this.opponent.canUseSausage()) {
-            const idx = availableMoves.indexOf(MOVES.SAUSAGE);
-            if (idx > -1) availableMoves.splice(idx, 1);
-        }
-        return availableMoves[Math.floor(Math.random() * availableMoves.length)];
-    }
-
-    resolveInteraction(p1, m1, p2, m2, p1HasEggSnap, p2HasEggSnap) {
-        // -- P1 USES ATTACK --
-        if (m1 === MOVES.ATTACK) {
-            if (m2 === MOVES.SAUSAGE) {
-                // P2 Reflects Attack?
-                // FIX: Use SNAPSHOT. If P2 started turn with Egg, they CANNOT reflect.
-                // Even if they cure it this turn (handled later/elsewhere), the "Reflect" capability is gone for this instant.
-                if (p2HasEggSnap) {
-                    this.log(`${p2.name} is holding an Egg, so Sausage fails to Reflect! They take damage!`);
-                    // Note: They might ALSO cure the egg in their own action phase.
-                    p2.hp -= 1;
-                } else {
-                    this.log(`${p2.name} Reflects the Attack with Sausage! ${p1.name} takes damage!`);
-                    p1.hp -= 1;
-                }
-            } else if (m2 === MOVES.BARRIER) {
-                this.log(`${p2.name}'s Barrier failed! Hit by Attack.`);
-                p2.hp -= 1;
-            } else {
-                this.log(`${p1.name} Attacks! ${p2.name} takes damage.`);
-                p2.hp -= 1;
+    checkDeaths(reason) {
+        const living = Array.from(this.players.values()).filter(p => !p.isDead);
+        living.forEach(p => {
+            if (p.hp <= 0) {
+                this.log(`${p.name} Defeated! (${reason})`);
+                p.isDead = true;
             }
-        }
+        });
 
-        // -- P1 USES EGG --
-        else if (m1 === MOVES.EGG) {
-            if (m2 === MOVES.BARRIER) {
-                this.log(`${p2.name}'s Barrier reflects the Egg! ${p1.name} receives an Uncurable Egg!`);
-                const instantDeath = p1.addEgg(true);
-                if (instantDeath) this.log(`${p1.name} already had an Egg! DOUBLE EGG!`);
-            } else if (m2 === MOVES.SAUSAGE) {
-                // Sausage vs New Egg
-                // FIX: Check cure OLD egg first.
-                const cured = p2.removeEgg(true);
-                if (cured) this.log(`${p2.name} ate a Sausage and cured their Old Egg!`);
-
-                this.log(`${p1.name} plants an Egg on ${p2.name}!`);
-                const instant = p2.addEgg();
-                if (instant) this.log(`${p2.name} already had an Egg! DOUBLE EGG!`);
-            } else {
-                this.log(`${p1.name} plants an Egg on ${p2.name}!`);
-                const instant = p2.addEgg();
-                if (instant) this.log(`${p2.name} already had an Egg! DOUBLE EGG!`);
-            }
-        }
-
-        // -- P1 USES SAUSAGE (Self-Cure part) --
-        if (m1 === MOVES.SAUSAGE) {
-            // FIX: If cured, no reflect (handled implicitly by order/logic above).
-            const cured = p1.removeEgg(true);
-            if (cured) {
-                this.log(`${p1.name} ate a Sausage and cured their Egg!`);
-            }
-        }
-    }
-
-    processEndOfTurn() {
-        // Phase 1: Action Resolution Death (Instant)
-        let instantWin = false;
-        if (this.player.hp <= 0 && this.opponent.hp <= 0) {
-            this.log("DOUBLE KO (Instant)! Sudden Death! HP -> 1.");
-            this.player.hp = 1; this.opponent.hp = 1;
-            this.player.eggs = []; this.opponent.eggs = [];
-        } else if (this.player.hp <= 0) {
+        const survivors = Array.from(this.players.values()).filter(p => !p.isDead);
+        if (survivors.length <= 1) {
             this.isGameOver = true;
-            this.log("You Lost (Instant)!");
-            if (this.onStateChange) this.onStateChange('gameover', 'lose');
-            instantWin = true;
-        } else if (this.opponent.hp <= 0) {
-            this.isGameOver = true;
-            this.log("You Won (Instant)!");
-            if (this.onStateChange) this.onStateChange('gameover', 'win');
-            instantWin = true;
-        }
-
-        if (instantWin) return;
-
-        // Phase 2: Timer Death
-        const p1Exploded = this.player.updateEggs();
-        const p2Exploded = this.opponent.updateEggs();
-
-        if (p1Exploded) this.log(`${this.player.name}'s Egg EXPLODED!`);
-        if (p2Exploded) this.log(`${this.opponent.name}'s Egg EXPLODED!`);
-
-        if (this.player.hp <= 0 && this.opponent.hp <= 0) {
-            this.log("DOUBLE KO (Timer)! Sudden Death! HP -> 1.");
-            this.player.hp = 1; this.opponent.hp = 1;
-            this.player.eggs = []; this.opponent.eggs = [];
-        } else if (this.player.hp <= 0) {
-            this.isGameOver = true;
-            this.log("You Lost (Time limit)!");
-            if (this.onStateChange) this.onStateChange('gameover', 'lose');
-        } else if (this.opponent.hp <= 0) {
-            this.isGameOver = true;
-            this.log("You Won (Time limit)!");
-            if (this.onStateChange) this.onStateChange('gameover', 'win');
+            const winner = survivors.length === 1 ? survivors[0].name : "No One (Draw)";
+            this.log(`GAME SET! Winner: ${winner}`);
+            if (this.onStateChange) this.onStateChange('gameover', winner);
         }
     }
 }
 
-/* --- UI CONTROLLER & NETWORK --- */
+/* --- UI CONTROLLER --- */
 const engine = new GameEngine();
-const net = new NetworkManager();
+const net = new NetworkManager();  // Revert Network Manager if needed, but we assume it exists? 
+// Note: NetworkManager logic needs to be updated for N Players eventually, but for now implementing Local/UI.
 
 const UI = {
     els: {
+        grid: document.getElementById('opponents-grid'),
         playerHpBar: document.getElementById('player-hp-bar'),
         playerHpText: document.getElementById('player-hp-text'),
-        opponentHpBar: document.getElementById('opponent-hp-bar'),
-        opponentHpText: document.getElementById('opponent-hp-text'),
         playerStatus: document.getElementById('player-status'),
-        opponentStatus: document.getElementById('opponent-status'),
         gameLog: document.getElementById('game-log'),
         buttons: document.querySelectorAll('.action-btn'),
         turnIndicator: document.getElementById('turn-indicator'),
         playerMove: document.getElementById('player-move'),
-        opponentMove: document.getElementById('opponent-move'),
-        stateMessage: document.getElementById('state-message'),
-        // Lobby
         lobbyScreen: document.getElementById('lobby-screen'),
         gameBoardMain: document.getElementById('game-board-main'),
         btnVsCpu: document.getElementById('btn-vs-cpu'),
         btnJoinRoom: document.getElementById('btn-join-room'),
         roomCodeInput: document.getElementById('room-code-input'),
+        playerNameInput: document.getElementById('player-name-input'),
         lobbyStatus: document.getElementById('lobby-status')
     },
 
+    pendingAction: null,
+
     init() {
-        // Game Buttons
         UI.els.buttons.forEach(btn => {
             btn.addEventListener('click', () => {
                 if (engine.isGameOver) {
-                    location.reload();
+                    // Rematch logic?
                     return;
                 }
                 const action = btn.dataset.action;
-                if (action === MOVES.SAUSAGE && !engine.player.canUseSausage()) {
-                    UI.logSystem("Overate sausages! Cannot use more than 2 in a row.");
-                    return;
+                if (action === MOVES.SAUSAGE && !engine.players.get(engine.myId).canUseSausage()) {
+                    UI.logSystem("Sausage Limit Reached!"); return;
                 }
 
-                UI.handlePlayerInput(action);
+                UI.handleActionClick(action);
             });
         });
 
-        // Lobby Buttons
-        UI.els.btnVsCpu.onclick = () => UI.startGame(false);
-        UI.els.btnJoinRoom.onclick = () => {
-            const code = UI.els.roomCodeInput.value.trim();
-            if (!code) {
-                UI.updateLobbyStatus("Please enter a Secret Word.", true);
-                return;
-            }
-            UI.startOnline(code);
+        UI.els.btnVsCpu.onclick = () => {
+            const name = UI.els.playerNameInput.value.trim() || "Player";
+            UI.startLocalGame(name);
         };
 
-        // Engine Hooks
+        // TODO: Online button logic needs update for Hosting
+    },
+
+    startLocalGame(myName) {
+        engine.initGame('p1', myName, [
+            { id: 'cpu1', name: 'CPU 1', isCpu: true },
+            { id: 'cpu2', name: 'CPU 2', isCpu: true },
+            // { id: 'cpu3', name: 'CPU 3', isCpu: true } // 4 Player
+        ]);
+
+        UI.els.lobbyScreen.style.display = 'none';
+        UI.els.gameBoardMain.style.display = 'flex';
+
         engine.onStateChange = (type, data) => {
             if (type === 'log') UI.logSystem(data);
             if (type === 'update') UI.render();
             if (type === 'gameover') UI.handleGameOver(data);
-            if (type === 'round_end') UI.showMoveReveal();
         };
 
         UI.render();
-    },
-
-    updateLobbyStatus(msg, isError = false) {
-        UI.els.lobbyStatus.textContent = msg;
-        UI.els.lobbyStatus.style.color = isError ? '#ff7b72' : 'var(--accent-secondary)';
-    },
-
-    startGame(isOnline) {
-        engine.reset();
-        engine.isOnline = isOnline;
-        if (isOnline) {
-            engine.opponent.name = "Opponent";
-            UI.updateLobbyStatus("Connected! Starting game...");
-        }
-
-        setTimeout(() => {
-            UI.els.lobbyScreen.style.display = 'none';
-            UI.els.gameBoardMain.style.display = 'flex';
-            UI.render();
-        }, 500);
-    },
-
-    async startOnline(secretWord) {
-        UI.updateLobbyStatus("Connecting to Neural Network...", false);
-        UI.els.lobbyScreen.classList.add('connecting');
-
-        net.onConnected = (isHost) => {
-            UI.updateLobbyStatus(isHost ? "Waiting for Opponent..." : "Found Room! Joining...");
-            // If guest, we just wait. If Host, we wait for connection.
-            // Actually onConnected fires when Peer connection is fully established (P2P).
-            // So if this fires, we are ready.
-            UI.startGame(true);
-        };
-
-        net.onData = (data) => {
-            if (data.type === 'move') {
-                engine.registerMove(false, data.move);
-                UI.logSystem("Opponent selected a move!");
-                // If we also moved, engine resolves round automatically.
-            }
-        };
-
-        net.onError = (type) => {
-            UI.els.lobbyScreen.classList.remove('connecting');
-            UI.updateLobbyStatus(`Connection Failed: ${type}`, true);
-        };
-
-        await net.connect(secretWord);
-    },
-
-    handlePlayerInput(action) {
-        // Disable buttons
-        UI.els.buttons.forEach(b => b.disabled = true);
-
-        // Visual feedback
-        UI.els.playerMove.textContent = "?";
-        UI.els.playerMove.classList.add('anim-pop');
-        UI.els.turnIndicator.textContent = "Waiting...";
-
-        if (engine.isOnline) {
-            net.send({ type: 'move', move: action });
-            engine.registerMove(true, action);
+        engine.queueCpuMoves();
+    }
+    ,
+    handleActionClick(action) {
+        // If action needs target (Attack/Egg)
+        if (action === MOVES.ATTACK || action === MOVES.EGG) {
+            UI.enterTargetingMode(action);
         } else {
-            // CPU Mode
-            // Fake delay for tension
-            setTimeout(() => {
-                const cpuMove = engine.decideCpuMove();
-                engine.registerMove(false, cpuMove); // Opponent Register
-                engine.registerMove(true, action);   // Player Register -> Triggers Resolve
-            }, 500);
+            // Sausage/Barrier = Self/No Target
+            UI.submitMove(action, null);
         }
     },
 
-    showMoveReveal() {
-        const lastP = engine.player.history[engine.player.history.length - 1];
-        const lastO = engine.opponent.history[engine.opponent.history.length - 1];
+    enterTargetingMode(action) {
+        UI.pendingAction = action;
+        document.body.classList.add('targeting-mode');
+        UI.logSystem(`Select target for ${action.toUpperCase()}...`);
+    },
 
-        UI.els.playerMove.innerHTML = UI.getIcon(lastP);
-        UI.els.opponentMove.innerHTML = UI.getIcon(lastO);
+    selectTarget(targetId) {
+        if (!UI.pendingAction) return;
+        document.body.classList.remove('targeting-mode');
+        UI.submitMove(UI.pendingAction, targetId);
+        UI.pendingAction = null;
+    },
 
-        // Re-enable buttons if game not over
-        if (!engine.isGameOver) {
-            UI.updateButtonStates();
+    submitMove(action, targetId) {
+        UI.els.buttons.forEach(b => b.disabled = true);
+        engine.registerMove(engine.myId, action, targetId);
+    },
+
+    render() {
+        const me = engine.players.get(engine.myId);
+        if (!me) return;
+
+        // Render Self
+        UI.updateHp(UI.els.playerHpBar, UI.els.playerHpText, me.hp);
+        UI.renderStatus(UI.els.playerStatus, me);
+        UI.els.turnIndicator.textContent = `Turn ${engine.turn}`;
+
+        // Render Opponents Grid
+        UI.els.grid.innerHTML = '';
+        engine.players.forEach(p => {
+            if (p.id === engine.myId) return; // Don't show self in grid
+
+            const card = document.createElement('div');
+            card.className = `opponent-card ${p.isDead ? 'dead' : ''}`;
+            card.onclick = () => {
+                if (document.body.classList.contains('targeting-mode') && !p.isDead) {
+                    UI.selectTarget(p.id);
+                }
+            };
+
+            // Avatar/Name
+            const nameEl = document.createElement('div');
+            nameEl.className = "avatar";
+            nameEl.textContent = p.name;
+            card.appendChild(nameEl);
+
+            // HP
+            const hpContainer = document.createElement('div');
+            hpContainer.className = "health-bar-container";
+            hpContainer.style.width = "100%";
+            hpContainer.innerHTML = `
+                <div class="health-bar"><div class="health-fill" style="width:${(p.hp / CONFIG.MAX_HP) * 100}%"></div></div>
+                <div class="health-text">${p.hp}/${CONFIG.MAX_HP}</div>
+            `;
+            card.appendChild(hpContainer);
+
+            // Eggs
+            const statusDiv = document.createElement('div');
+            statusDiv.className = "status-effects";
+            UI.renderStatus(statusDiv, p);
+            card.appendChild(statusDiv);
+
+            // Move Reveal (History)
+            const moveDiv = document.createElement('div');
+            moveDiv.className = "move-reveal";
+            // Show last move if decided
+            // Or "?" if waiting? 
+            // In Engine, we don't know moves until resolved. 
+            // Show History[-1]
+            if (p.history.length > 0) {
+                moveDiv.innerHTML = UI.getIcon(p.history[p.history.length - 1]);
+            } else {
+                moveDiv.textContent = "?";
+            }
+            card.appendChild(moveDiv);
+
+            UI.els.grid.appendChild(card);
+        });
+
+        // Re-enable buttons if turn active
+        if (me.currentMove === null && !me.isDead && !engine.isGameOver) {
+            UI.els.buttons.forEach(b => b.disabled = false);
+            // Validation
+            const sausageBtn = document.querySelector('[data-action="sausage"]');
+            if (sausageBtn && !me.canUseSausage()) sausageBtn.disabled = true;
         }
+    },
+
+    updateHp(bar, text, hp) {
+        bar.style.width = `${(hp / CONFIG.MAX_HP) * 100}%`;
+        text.textContent = `${hp}/${CONFIG.MAX_HP}`;
+    },
+
+    renderStatus(container, player) {
+        container.innerHTML = '';
+        player.eggs.forEach(egg => {
+            const div = document.createElement('div');
+            div.className = 'status-icon';
+            div.innerHTML = '🥚';
+            if (egg.isReflected) div.style.filter = "hue-rotate(90deg)"; // Visually distinguish?
+            container.appendChild(div);
+        });
     },
 
     getIcon(move) {
@@ -439,60 +493,20 @@ const UI = {
         UI.els.gameLog.prepend(div);
     },
 
-    render() {
-        UI.updateHp(UI.els.playerHpBar, UI.els.playerHpText, engine.player.hp);
-        UI.updateHp(UI.els.opponentHpBar, UI.els.opponentHpText, engine.opponent.hp);
-        UI.renderStatus(UI.els.playerStatus, engine.player);
-        UI.renderStatus(UI.els.opponentStatus, engine.opponent);
-        UI.els.turnIndicator.textContent = engine.isGameOver ? "Game Over" :
-            (engine.myMove ? "Waiting for Opponent..." : `Turn ${engine.turn}`);
-    },
-
-    updateHp(bar, text, hp) {
-        const pct = (hp / CONFIG.MAX_HP) * 100;
-        bar.style.width = `${pct}%`;
-        text.textContent = `${hp}/${CONFIG.MAX_HP}`;
-        bar.className = 'health-fill';
-        void bar.offsetWidth; // Reflow
-        if (hp <= 2) bar.classList.add('low');
-        if (hp <= 1) bar.classList.add('critical');
-    },
-
-    renderStatus(container, player) {
-        container.innerHTML = '';
-        player.eggs.forEach(egg => {
-            const div = document.createElement('div');
-            div.className = 'status-icon';
-            div.innerHTML = '🥚';
-
-            const badge = document.createElement('div');
-            badge.className = 'status-badge';
-            badge.textContent = egg.turnsRemaining + 1;
-
-            div.appendChild(badge);
-            container.appendChild(div);
-        });
-    },
-
-    updateButtonStates() {
-        UI.els.buttons.forEach(btn => {
-            btn.disabled = false;
-            if (btn.dataset.action === MOVES.SAUSAGE && !engine.player.canUseSausage()) {
-                btn.disabled = true;
-            }
-        });
-    },
-
-    handleGameOver(result) {
-        UI.els.stateMessage.textContent = result === 'win' ? "VICTORY!" : "DEFEAT";
-        const restartBtn = document.createElement('button');
-        restartBtn.className = 'action-btn';
-        restartBtn.textContent = "Back to Lobby";
-        restartBtn.style.gridColumn = "span 2";
-        restartBtn.onclick = () => location.reload();
-
+    handleGameOver(winner) {
+        // Show Rematch Button
         const controls = document.querySelector('.action-buttons');
         controls.innerHTML = '';
+
+        const restartBtn = document.createElement('button');
+        restartBtn.className = 'action-btn';
+        restartBtn.textContent = "Rematch";
+        restartBtn.onclick = () => {
+            // Local: Just Restart
+            // Online: Vote Rematch (Not Implemented yet)
+            UI.startLocalGame(engine.players.get(engine.myId).name);
+            location.reload(); // Simplest for now to clear state
+        };
         controls.appendChild(restartBtn);
     }
 };
