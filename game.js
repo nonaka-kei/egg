@@ -1,6 +1,6 @@
 /**
  * Egg Game - Core Logic & UI Controller
- * Updated for N-Player Battle Royale
+ * Updated for N-Player Battle Royale + Online Network
  */
 
 /* --- CONSTANTS & CONFIG --- */
@@ -41,13 +41,10 @@ class PlayerState {
         if (this.eggs.length === 0) return false;
         const curableEggs = this.eggs.filter(e => {
             if (onlyCurable && e.isReflected) return false;
-            // Only 'existing' eggs (not new ones added this turn cycle, if any exposed)
             return true;
         });
 
         if (curableEggs.length === 0) return false;
-        // Remove ALL curable (usually just 1 old one, logic might need distinct handling if multiple)
-        // Rule say "Cures Egg". If multiple? Assume all curable ones.
         this.eggs = this.eggs.filter(e => !curableEggs.includes(e));
         return true;
     }
@@ -77,9 +74,7 @@ class GameEngine {
         this.isGameOver = false;
         this.logs = [];
         this.onStateChange = null;
-
-        // For Offline CPU Mode
-        this.cpuInterval = null;
+        this.isHost = false; // Flag for Network Role
     }
 
     initGame(myId, myName, others = []) {
@@ -98,6 +93,9 @@ class GameEngine {
         this.isGameOver = false;
         this.logs = [];
         this.log("Game Start! Battle Royale Mode.");
+
+        // Host Broadcast Initial State
+        if (this.isHost) this.broadcastState();
     }
 
     log(message) {
@@ -105,8 +103,63 @@ class GameEngine {
         if (this.onStateChange) this.onStateChange('log', message);
     }
 
-    // Call for both Player (via UI) and Network (on receive)
+    // --- NETWORK HELPERS ---
+    serializeState() {
+        return {
+            turn: this.turn,
+            isGameOver: this.isGameOver,
+            logs: this.logs,
+            players: Array.from(this.players.values()).map(p => ({
+                id: p.id,
+                name: p.name,
+                hp: p.hp,
+                eggs: p.eggs,
+                history: p.history,
+                isDead: p.isDead,
+                isCpu: p.isCpu
+            }))
+        };
+    }
+
+    applyState(data) {
+        this.turn = data.turn;
+        this.isGameOver = data.isGameOver;
+        this.logs = data.logs; // Host logs are authoritative
+
+        data.players.forEach(pData => {
+            let p = this.players.get(pData.id);
+            if (!p) {
+                p = new PlayerState(pData.id, pData.name, pData.isCpu);
+                this.players.set(pData.id, p);
+            }
+            // Sync mutable state
+            p.hp = pData.hp;
+            p.eggs = pData.eggs;
+            p.history = pData.history;
+            p.isDead = pData.isDead;
+        });
+
+        if (this.onStateChange) {
+            this.onStateChange('log', null); // Refresh logs
+            this.onStateChange('update');
+        }
+    }
+
+    broadcastState() {
+        if (!this.isHost) return;
+        const state = this.serializeState();
+        net.broadcast({ type: 'state', state: state });
+    }
+
+    // --- MOVE LOGIC ---
     registerMove(playerId, action, targetId) {
+        // CLIENT: Send to Host
+        if (!this.isHost && playerId === this.myId) {
+            net.sendToHost({ type: 'move', action, targetId });
+            this.log("Waiting for others...");
+            return;
+        }
+
         const p = this.players.get(playerId);
         if (!p || p.isDead) return;
 
@@ -119,19 +172,22 @@ class GameEngine {
 
         if (allReady) {
             this.resolveTurn();
+            if (this.isHost) this.broadcastState(); // Sync after turn
         }
     }
 
     // CPU Logic (Host/Local only)
     queueCpuMoves() {
+        if (!this.isHost && this.players.size > 0 && !this.players.get(this.myId).isCpu) return; // Only Host manages CPUs logic essentially (or Local)
+        // Actually, if Local Only, isHost is false? No, we treat Local as Host=false usually but Engine checks are lax.
+        // Let's assume Local mode sets isHost=false but calls queueCpuMoves explicitly.
+
         const cpus = Array.from(this.players.values()).filter(p => p.isCpu && !p.isDead);
         if (cpus.length === 0) return;
 
-        // Simple delay
         setTimeout(() => {
             cpus.forEach(cpu => {
                 const move = this.decideCpuMove(cpu);
-                // Target random living opponent
                 const potentialTargets = Array.from(this.players.values())
                     .filter(p => !p.isDead && p.id !== cpu.id);
 
@@ -146,7 +202,6 @@ class GameEngine {
     }
 
     decideCpuMove(cpuState) {
-        // AI Logic
         if (cpuState.eggs.some(e => !e.isReflected) && cpuState.canUseSausage()) {
             return MOVES.SAUSAGE;
         }
@@ -181,47 +236,35 @@ class GameEngine {
         const refEggMap = new Map();
         livingPlayers.forEach(p => { damageMap.set(p.id, 0); eggMap.set(p.id, 0); refEggMap.set(p.id, 0); });
 
-        // Loop Defenders
         livingPlayers.forEach(defender => {
             const defAction = defender.currentMove;
-            const defHasEgg = defender.hasEggSnapshot; // Snapshot!
+            const defHasEgg = defender.hasEggSnapshot;
 
-            // Self Cure
             if (defAction === MOVES.SAUSAGE && defHasEgg) {
                 if (defender.removeEgg(true)) this.log(`${defender.name} cured their Egg!`);
             }
 
-            // Incoming
             const attackers = livingPlayers.filter(p => p.targetId === defender.id && p.id !== defender.id);
             attackers.forEach(attacker => {
                 const atkAction = attacker.currentMove;
 
-                // Attack
                 if (atkAction === MOVES.ATTACK) {
                     if (defAction === MOVES.SAUSAGE && !defHasEgg) {
-                        // Reflect
                         this.log(`${defender.name} Reflects ${attacker.name}'s Attack!`);
                         damageMap.set(attacker.id, (damageMap.get(attacker.id) || 0) + 1);
                     } else if (defAction === MOVES.BARRIER) {
-                        // Fail
                         this.log(`${defender.name}'s Barrier fails vs Attack!`);
                         damageMap.set(defender.id, (damageMap.get(defender.id) || 0) + 1);
                     } else {
-                        // Hit
                         this.log(`${attacker.name} Attacks ${defender.name}!`);
                         damageMap.set(defender.id, (damageMap.get(defender.id) || 0) + 1);
                     }
                 }
-                // Egg
                 else if (atkAction === MOVES.EGG) {
                     if (defAction === MOVES.BARRIER) {
-                        // Reflect
                         this.log(`${defender.name} Reflects ${attacker.name}'s Egg! (Uncurable)`);
                         refEggMap.set(attacker.id, (refEggMap.get(attacker.id) || 0) + 1);
                     } else if (defAction === MOVES.SAUSAGE && !defHasEgg) {
-                        // Sausage Reflects New Egg? NO. 
-                        // "Sausage... Reflects 'Attack'". Only Attack.
-                        // So Egg lands.
                         this.log(`${attacker.name} plants Egg on ${defender.name}!`);
                         eggMap.set(defender.id, (eggMap.get(defender.id) || 0) + 1);
                     } else {
@@ -240,8 +283,6 @@ class GameEngine {
             const refEggs = (refEggMap.get(p.id) || 0);
             const totalIncoming = newEggs + refEggs;
 
-            // Rules: "Egg from 2+ people simultaneously -> Instant Death"
-            // Rules: "Already has egg + New Egg -> Instant Death"
             if (totalIncoming >= 2) {
                 this.log(`${p.name} HIT BY MULTIPLE EGGS! INSTANT DEATH!`);
                 p.hp = 0;
@@ -269,8 +310,8 @@ class GameEngine {
         this.turn++;
         if (this.onStateChange) this.onStateChange('update');
 
-        // Trigger CPU if needed
-        this.queueCpuMoves();
+        // CPU trigger for Host
+        if (this.isHost) this.queueCpuMoves();
     }
 
     checkDeaths(reason) {
@@ -294,8 +335,7 @@ class GameEngine {
 
 /* --- UI CONTROLLER --- */
 const engine = new GameEngine();
-const net = new NetworkManager();  // Revert Network Manager if needed, but we assume it exists? 
-// Note: NetworkManager logic needs to be updated for N Players eventually, but for now implementing Local/UI.
+const net = new NetworkManager();
 
 const UI = {
     els: {
@@ -313,7 +353,7 @@ const UI = {
         btnJoinRoom: document.getElementById('btn-join-room'),
         roomCodeInput: document.getElementById('room-code-input'),
         playerNameInput: document.getElementById('player-name-input'),
-        cpuCountInput: document.getElementById('cpu-count-input'), // Add this
+        cpuCountInput: document.getElementById('cpu-count-input'),
         lobbyStatus: document.getElementById('lobby-status')
     },
 
@@ -323,7 +363,7 @@ const UI = {
         UI.els.buttons.forEach(btn => {
             btn.addEventListener('click', () => {
                 if (engine.isGameOver) {
-                    // Rematch logic?
+                    location.reload(); // Rematch via reload needed for Online to reset Peer? Or implement soft reset.
                     return;
                 }
                 const action = btn.dataset.action;
@@ -341,18 +381,89 @@ const UI = {
             UI.startLocalGame(name, cpuCount);
         };
 
-        // TODO: Online button logic needs update for Hosting
+        UI.els.btnJoinRoom.onclick = () => {
+            const name = UI.els.playerNameInput.value.trim() || "Player";
+            const code = UI.els.roomCodeInput.value.trim();
+            if (!code) { UI.updateLobbyStatus("Enter a room word!", true); return; }
+            UI.startOnlineGame(name, code);
+        };
     },
 
     startLocalGame(myName, cpuCount = 2) {
-        // Generate CPUs
+        engine.isHost = true; // Local acts as Host for CPUs
         const others = [];
         for (let i = 1; i <= cpuCount; i++) {
             others.push({ id: `cpu${i}`, name: `CPU ${i}`, isCpu: true });
         }
 
         engine.initGame('p1', myName, others);
+        UI.startGameUI();
+        engine.queueCpuMoves();
+    },
 
+    async startOnlineGame(myName, secretWord) {
+        UI.updateLobbyStatus("Connecting to Neural Space...", false);
+        UI.els.lobbyScreen.classList.add('connecting');
+
+        // Wire up Network callbacks
+        net.onConnected = (isHost, myId) => {
+            engine.isHost = isHost;
+            if (isHost) {
+                UI.updateLobbyStatus("You are Host! Waiting for players...");
+                // HOST INIT
+                engine.initGame(myId, myName, []); // No others yet
+                // Auto-start? Or wait button?
+                // For simplicity, let's start and let people join mid-way? 
+                // Or better: Host stays in Lobby until X players?
+                // User request didn't specify Lobby Waiting Room.
+                // Let's jump to game, but maybe add "Waiting..." overlay?
+                // For now, jump to game.
+                UI.startGameUI();
+                UI.logSystem("Waiting for opponents to join...");
+            } else {
+                UI.updateLobbyStatus("Connected! Waiting for Host...");
+                // Client just waits for State Update to Init
+            }
+        };
+
+        net.onPeerJoin = (peerId, meta) => {
+            if (engine.isHost) {
+                const name = meta ? meta.name : "Guest";
+                UI.logSystem(`${name} joined!`);
+                // Add to Engine
+                engine.players.set(peerId, new PlayerState(peerId, name));
+                engine.broadcastState(); // Send them current state
+                UI.render();
+            }
+        };
+
+        net.onData = (data, source) => {
+            if (engine.isHost) {
+                if (data.type === 'move') {
+                    // Register their move
+                    engine.registerMove(source, data.action, data.targetId);
+                }
+            } else {
+                if (data.type === 'state') {
+                    // Init if not yet
+                    if (engine.players.size === 0) {
+                        engine.myId = net.myId;
+                        UI.startGameUI();
+                    }
+                    engine.applyState(data.state);
+                }
+            }
+        };
+
+        net.onError = (type) => {
+            UI.els.lobbyScreen.classList.remove('connecting');
+            UI.updateLobbyStatus(`Connection Error: ${type}`, true);
+        };
+
+        await net.connect(secretWord, myName);
+    },
+
+    startGameUI() {
         UI.els.lobbyScreen.style.display = 'none';
         UI.els.gameBoardMain.style.display = 'flex';
 
@@ -363,15 +474,17 @@ const UI = {
         };
 
         UI.render();
-        engine.queueCpuMoves();
-    }
-    ,
+    },
+
+    updateLobbyStatus(msg, isError) {
+        UI.els.lobbyStatus.textContent = msg;
+        UI.els.lobbyStatus.style.color = isError ? '#ff7b72' : 'var(--accent-secondary)';
+    },
+
     handleActionClick(action) {
-        // If action needs target (Attack/Egg)
         if (action === MOVES.ATTACK || action === MOVES.EGG) {
             UI.enterTargetingMode(action);
         } else {
-            // Sausage/Barrier = Self/No Target
             UI.submitMove(action, null);
         }
     },
@@ -391,6 +504,7 @@ const UI = {
 
     submitMove(action, targetId) {
         UI.els.buttons.forEach(b => b.disabled = true);
+        // engine.registerMove checks isHost and sends if needed
         engine.registerMove(engine.myId, action, targetId);
     },
 
@@ -398,15 +512,13 @@ const UI = {
         const me = engine.players.get(engine.myId);
         if (!me) return;
 
-        // Render Self
         UI.updateHp(UI.els.playerHpBar, UI.els.playerHpText, me.hp);
         UI.renderStatus(UI.els.playerStatus, me);
         UI.els.turnIndicator.textContent = `Turn ${engine.turn}`;
 
-        // Render Opponents Grid
         UI.els.grid.innerHTML = '';
         engine.players.forEach(p => {
-            if (p.id === engine.myId) return; // Don't show self in grid
+            if (p.id === engine.myId) return;
 
             const card = document.createElement('div');
             card.className = `opponent-card ${p.isDead ? 'dead' : ''}`;
@@ -416,13 +528,11 @@ const UI = {
                 }
             };
 
-            // Avatar/Name
             const nameEl = document.createElement('div');
             nameEl.className = "avatar";
-            nameEl.textContent = p.name;
+            nameEl.textContent = p.name + (p.isCpu ? "" : " (Net)");
             card.appendChild(nameEl);
 
-            // HP
             const hpContainer = document.createElement('div');
             hpContainer.className = "health-bar-container";
             hpContainer.style.width = "100%";
@@ -432,20 +542,24 @@ const UI = {
             `;
             card.appendChild(hpContainer);
 
-            // Eggs
             const statusDiv = document.createElement('div');
             statusDiv.className = "status-effects";
             UI.renderStatus(statusDiv, p);
             card.appendChild(statusDiv);
 
-            // Move Reveal (History)
             const moveDiv = document.createElement('div');
             moveDiv.className = "move-reveal";
-            // Show last move if decided
-            // Or "?" if waiting? 
-            // In Engine, we don't know moves until resolved. 
-            // Show History[-1]
-            if (p.history.length > 0) {
+            // Show history or "?"
+            if (p.history.length === engine.turn - 1) {
+                // Previous turn move
+                // Wait, p.history length matches turn if we pushed it.
+                // If engine.turn is 2, and p.history has 1 item, that's turn 1 move.
+                moveDiv.innerHTML = UI.getIcon(p.history[p.history.length - 1]);
+            } else if (p.history.length === engine.turn) {
+                // Current turn move (Wait, resolved?)
+                // If resolved, turn increments?
+                // Engine logic: resolve -> push history -> turn++.
+                // So history.length == turn - 1.
                 moveDiv.innerHTML = UI.getIcon(p.history[p.history.length - 1]);
             } else {
                 moveDiv.textContent = "?";
@@ -455,10 +569,8 @@ const UI = {
             UI.els.grid.appendChild(card);
         });
 
-        // Re-enable buttons if turn active
         if (me.currentMove === null && !me.isDead && !engine.isGameOver) {
             UI.els.buttons.forEach(b => b.disabled = false);
-            // Validation
             const sausageBtn = document.querySelector('[data-action="sausage"]');
             if (sausageBtn && !me.canUseSausage()) sausageBtn.disabled = true;
         }
@@ -467,6 +579,9 @@ const UI = {
     updateHp(bar, text, hp) {
         bar.style.width = `${(hp / CONFIG.MAX_HP) * 100}%`;
         text.textContent = `${hp}/${CONFIG.MAX_HP}`;
+        bar.className = 'health-fill';
+        if (hp <= 2) bar.classList.add('low');
+        if (hp <= 1) bar.classList.add('critical');
     },
 
     renderStatus(container, player) {
@@ -475,7 +590,7 @@ const UI = {
             const div = document.createElement('div');
             div.className = 'status-icon';
             div.innerHTML = '🥚';
-            if (egg.isReflected) div.style.filter = "hue-rotate(90deg)"; // Visually distinguish?
+            if (egg.isReflected) div.style.filter = "hue-rotate(90deg)";
             container.appendChild(div);
         });
     },
@@ -498,19 +613,14 @@ const UI = {
     },
 
     handleGameOver(winner) {
-        // Show Rematch Button
         const controls = document.querySelector('.action-buttons');
         controls.innerHTML = '';
 
         const restartBtn = document.createElement('button');
         restartBtn.className = 'action-btn';
-        restartBtn.textContent = "Rematch";
-        restartBtn.onclick = () => {
-            // Local: Just Restart
-            // Online: Vote Rematch (Not Implemented yet)
-            UI.startLocalGame(engine.players.get(engine.myId).name);
-            location.reload(); // Simplest for now to clear state
-        };
+        restartBtn.textContent = "Rematch / Lobby";
+        restartBtn.style.gridColumn = "span 2";
+        restartBtn.onclick = () => location.reload();
         controls.appendChild(restartBtn);
     }
 };
