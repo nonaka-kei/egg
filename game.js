@@ -313,6 +313,7 @@ const UI = {
         btnJoinRoom: document.getElementById('btn-join-room'),
         roomCodeInput: document.getElementById('room-code-input'),
         playerNameInput: document.getElementById('player-name-input'),
+        cpuCountInput: document.getElementById('cpu-count-input'), // Add this
         lobbyStatus: document.getElementById('lobby-status')
     },
 
@@ -336,18 +337,21 @@ const UI = {
 
         UI.els.btnVsCpu.onclick = () => {
             const name = UI.els.playerNameInput.value.trim() || "Player";
-            UI.startLocalGame(name);
+            const cpuCount = parseInt(UI.els.cpuCountInput.value) || 2;
+            UI.startLocalGame(name, cpuCount);
         };
 
         // TODO: Online button logic needs update for Hosting
     },
 
-    startLocalGame(myName) {
-        engine.initGame('p1', myName, [
-            { id: 'cpu1', name: 'CPU 1', isCpu: true },
-            { id: 'cpu2', name: 'CPU 2', isCpu: true },
-            // { id: 'cpu3', name: 'CPU 3', isCpu: true } // 4 Player
-        ]);
+    startLocalGame(myName, cpuCount = 2) {
+        // Generate CPUs
+        const others = [];
+        for (let i = 1; i <= cpuCount; i++) {
+            others.push({ id: `cpu${i}`, name: `CPU ${i}`, isCpu: true });
+        }
+
+        engine.initGame('p1', myName, others);
 
         UI.els.lobbyScreen.style.display = 'none';
         UI.els.gameBoardMain.style.display = 'flex';
